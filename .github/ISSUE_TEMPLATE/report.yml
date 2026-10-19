@@ -1,0 +1,31 @@
+name: Report
+description: A bug, or a measurement from another machine
+body:
+  - type: input
+    id: machine
+    attributes:
+      label: Laptop or board model and CPU
+      placeholder: Legion 5 15IAX10 (83F0), Core Ultra 9 275HX
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: macOS build, OpenCore, Lilu, LegionCpuPower versions
+      placeholder: 26.7.1 (25G241), OC 1.0.8, Lilu 1.7.2, LegionCpuPower 0.2.0
+    validations:
+      required: true
+  - type: textarea
+    id: status
+    attributes:
+      label: Output of sysctl debug.legioncpu
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: cpuload.py results with the switches off and on, temperatures, anything in log show --predicate 'eventMessage CONTAINS "lcp"'.
+    validations:
+      required: true

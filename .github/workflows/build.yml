@@ -1,0 +1,27 @@
+name: build
+on:
+  push:
+  pull_request:
+  release:
+    types: [published]
+jobs:
+  build:
+    runs-on: macos-15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - run: tools/build-mac.sh
+      - run: probe/build-mac.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LegionCpuPower
+          path: out/LegionCpuPower.kext
+      - if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p LegionCpuPower-${GITHUB_REF_NAME}
+          cp -R out/LegionCpuPower.kext probe/out/LegionCpuProbe.kext LICENSE LegionCpuPower-${GITHUB_REF_NAME}/
+          zip -r LegionCpuPower-${GITHUB_REF_NAME}-ci.zip LegionCpuPower-${GITHUB_REF_NAME}
+          gh release upload "$GITHUB_REF_NAME" LegionCpuPower-${GITHUB_REF_NAME}-ci.zip
