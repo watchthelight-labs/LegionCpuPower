@@ -13,6 +13,7 @@ jobs:
       - uses: actions/checkout@v4
       - run: tools/build-mac.sh
       - run: probe/build-mac.sh
+      - run: legionfan/build.sh
       - uses: actions/upload-artifact@v4
         with:
           name: LegionCpuPower
@@ -22,6 +23,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p LegionCpuPower-${GITHUB_REF_NAME}
-          cp -R out/LegionCpuPower.kext probe/out/LegionCpuProbe.kext LICENSE LegionCpuPower-${GITHUB_REF_NAME}/
+          cp -R out/LegionCpuPower.kext probe/out/LegionCpuProbe.kext legionfan/out/LegionFan.app LICENSE LegionCpuPower-${GITHUB_REF_NAME}/
           zip -r LegionCpuPower-${GITHUB_REF_NAME}-ci.zip LegionCpuPower-${GITHUB_REF_NAME}
           gh release upload "$GITHUB_REF_NAME" LegionCpuPower-${GITHUB_REF_NAME}-ci.zip

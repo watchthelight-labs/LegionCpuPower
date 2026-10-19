@@ -77,8 +77,9 @@ core) in case any path writes it again.
 
 With both fixes, at boot: 1 thread 411-424 Mops/s (P-cores reach ratio 47), 24 threads 8882 Mops/s at 83 W. Heat is the
 next limit on a laptop: the package reaches 100-104 C and the CPU's thermal throttling (TjMax 105 C with an offset of 2)
-lowers the clocks. The heat guard in the plugin is extra: after 30 s at 100 C or more it returns to the firmware's 30 W
-until the package has been below 85 C for a minute.
+lowers the clocks. The heat guard in the plugin is extra. The first version dropped to the firmware's 30 W after 30 s at
+100 C, which cut a Cinebench run in half; since 0.3.3 it steps the limit down from the measured package power, 10 W at
+a time with a 45 W floor, and back up 5 W per 30 s once the package is below 90 C.
 
 ## Things this does not do
 
@@ -86,4 +87,6 @@ until the package has been below 85 C for a minute.
 - The battery profile's Low Power Mode caps XCPM's ratio further; with hwp=1 the plugin's request wins, so the
   battery-saving effect of Low Power Mode on the CPU is gone. Use EPP (`debug.legioncpu.epp`, higher = more saving) if
   battery life matters.
-- No fan control. The fans follow Lenovo's EC and the Fn+Q mode.
+- Fan control is specific to the Legion 5 15IAX10's firmware (`\_SB.GZFD` WMI methods, EC 0x5508 generation). On this
+  EC the full-speed bit and the custom fan table are stored but ignored unless Lenovo's Custom power mode is active,
+  which LenovoLegionLinux documents for the sibling models too. Other Legion models may need different calls.

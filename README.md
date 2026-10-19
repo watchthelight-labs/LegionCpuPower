@@ -16,6 +16,9 @@ things hold it back on a Hackintosh, and the plugin fixes both:
    (about 61 MHz on the P-cores and 70 MHz on the E-cores of a 275HX), so 54 stops the P-cores at 3.3 GHz and the
    E-cores at 3.8 GHz. The plugin takes the HWP request over and gives each core its own lowest-to-highest range.
 
+It also controls the fans of the Legion 5 15IAX10 (full speed, a low curve or your own curve) through Lenovo's own
+firmware methods, with a menu bar app, LegionFan, to switch between them.
+
 ## Results
 
 Lenovo Legion 5 15IAX10 (Core Ultra 9 275HX), macOS 26.7.1 (25G241), OpenCore 1.0.8, Lilu 1.7.2, on AC. The load is
@@ -28,8 +31,7 @@ Lenovo Legion 5 15IAX10 (Core Ultra 9 275HX), macOS 26.7.1 (25G241), OpenCore 1.
 | 24 threads | 5666 Mops/s, 30 W | 8882 Mops/s, 83 W | +57 % |
 
 On this laptop heat is now the limit: with all cores busy the package reaches 100-104 C and the CPU's own thermal
-throttling takes over before 120 W or 5.4 GHz is reached. Better cooling (a stand, Lenovo's Performance mode with
-Fn+Q for the louder fan curve) gives more.
+throttling takes over before 120 W or 5.4 GHz is reached. Better cooling (a stand, full-speed fans, below) gives more.
 
 ## Requirements
 
@@ -60,15 +62,36 @@ Both fixes are on at boot. They can be changed at runtime, and a reboot always r
 | `debug.legioncpu.hwp` | 1 = per-core HWP requests from this plugin, 0 = back to XCPM |
 | `debug.legioncpu.pl` | 1 = MCHBAR limit follows MSR 0x610, 0 = the firmware's value |
 | `debug.legioncpu.epp` | energy/performance hint written with hwp=1: 0 performance ... 255 power saving (default 32) |
+| `debug.legioncpu.guard` | 1 = heat guard (below), 0 = only the CPU's own thermal throttling |
+| `debug.legioncpu.fan` | 0 auto (firmware curve), 1 full speed, 2 custom curve, 3 low |
+| `debug.legioncpu.fancurve` | the ten points of the custom curve, fan levels 1-10, e.g. `2,2,3,4,5,6,7,8,9,10` |
 | `debug.legioncpu.status` | read-only state |
 
 Example: `sudo sysctl -w debug.legioncpu.pl=0`.
 
-Boot-args: `-legioncpunohwp` and `-legioncpunopl` turn one fix off, `-legioncpuoff` disables the plugin.
+Boot-args: `-legioncpunohwp`, `-legioncpunopl` and `-legioncpunofan` turn one part off, `-legioncpuoff` disables the
+plugin.
 
-**Heat guard.** If the package stays at 100 C or more for 30 s, the plugin puts the firmware's power limit back until the
-package has been below 85 C for a minute, then raises it again. It never touches TjMax or any thermal register; the
-CPU's own thermal protection stays in charge.
+**Heat guard.** After a minute at 100 C or more, the plugin caps the power limit at the package power it measured minus
+10 W (never below 45 W), and again after every further minute that hot. Each 30 s below 90 C raises the cap by 5 W
+until it is back at the firmware's limits. It never touches TjMax or any thermal register; the CPU's own thermal
+protection stays in charge. Set `debug.legioncpu.guard=0` for benchmarks.
+
+## Fans (Legion 5 15IAX10)
+
+Fan modes go through Lenovo's WMI methods on the `\_SB.GZFD` ACPI device, the same calls Lenovo Vantage makes on
+Windows: full speed is feature 0x04020000 of `WMAE`, the curve is `WMAB` methods 5 and 6 (ten fan levels in EC RAM).
+On this EC both only take effect in Lenovo's Custom power mode, so modes 1-3 switch the laptop to Custom (`WMAA` 0x2C
+with 0xFF, on AC only) and auto puts the previous mode back. The plugin waits two minutes after boot before changing
+the power mode: the firmware notifies the GPU on a mode change, and doing that while the NVIDIA driver was bringing up
+the display left it without acceleration. In modes 2 and 3, 10 s at 95 C or more switches to full speed until the
+package has been below 80 C for a minute.
+
+Measured: full speed 5500-5700 rpm, the firmware curve 3300-4300 rpm at the same temperatures.
+
+**LegionFan** (`legionfan/`) is a menu bar app for this: Auto, Low, Full speed, Custom curve and a ten-slider curve
+editor, with the fan speeds in the menu. A root LaunchDaemon applies the saved choice at boot, before login; the app
+starts at login. `legionfan/build.sh`, then `sudo legionfan/install.sh` (`--remove` uninstalls).
 
 ## What it changes, exactly
 
@@ -77,6 +100,9 @@ CPU's own thermal protection stays in charge.
   desired 0 (hardware decides), EPP from the sysctl. Checked once a second and written again if something changed it.
 - The kernel variable `_xcpm_hwp_enabled` set to 0 while hwp=1, so XCPM stops writing HWP requests (it writes
   IA32_PERF_CTL instead, which the CPU ignores while HWP is enabled). Set back to 1 on `hwp=0`.
+
+- With a fan mode other than auto: Lenovo's power mode (Custom), the EC's full-speed bit and its custom fan table,
+  through the firmware's own ACPI methods. Auto restores the previous power mode and the fan table found at boot.
 
 Nothing is written to disk or NVRAM.
 

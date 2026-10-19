@@ -3,7 +3,7 @@
 // LegionCpuPower: lets the Core Ultra 9 275HX (Arrow Lake-HX) in the Legion 5 15IAX10 run at its real clocks and power
 // under macOS 26.
 //
-// Two independent fixes, both on at boot (boot-args -legioncpunohwp / -legioncpunopl turn one off) and switchable at
+// Three switches, all on at boot (boot-args -legioncpunohwp / -legioncpunopl / -legioncpunofan turn one off) and switchable at
 // runtime (sudo sysctl -w debug.legioncpu.<name>=0|1):
 //
 // hwp  XCPM writes IA32_HWP_REQUEST (0x774) with min/max in 100 MHz ratios (max 54 = 5.4 GHz from MSR 0x1AD). On Arrow
@@ -16,9 +16,20 @@
 // pl   The firmware keeps a second package power limit in MCHBAR + 0x59A0 and sets it to about 30 W at boot; Lenovo's
 //      Windows software raises it, nothing does under macOS. The CPU obeys the lower of it and MSR 0x610 (PL1 120 W,
 //      PL2 168 W, locked). With pl=1 this kext copies 0x610's PL1/PL2 fields into MCHBAR (unless MCHBAR is locked) and
-//      keeps them there; with pl=0 it puts the firmware's value back. If the package stays at 100 C or more for 30 s it
-//      puts the firmware value back until the package has been below 85 C for a minute. Thermal MSRs and TjMax are never
-//      touched.
+//      keeps them there; with pl=0 it puts the firmware's value back. Heat guard (debug.legioncpu.guard, default 1):
+//      a minute at 100 C or more caps PL1/PL2 at the measured package power minus 10 W (never below 45 W), and again
+//      after every further minute that hot; each 30 s below 90 C raises the cap 5 W until it reaches 0x610's limits.
+//      Thermal MSRs and TjMax are never touched, so the CPU's own throttling at TjMax stays in charge.
+//
+// fan  0 auto (the EC's own curve), 1 full speed, 2 custom curve (debug.legioncpu.fancurve), 3 low (the EC curve at
+//      60 % for the lower eight points, the two hottest kept). Full speed is Lenovo's WMI feature 0x04020000 through
+//      \_SB.GZFD.WMAE SetFeatureValue (sets EC bit FNST, EC RAM 0xFE50058B bit 0, under the firmware's EC mutex), the
+//      call Lenovo Vantage makes on Windows. Curves go through \_SB.GZFD.WMAB method 6 (EC F9F0-F9F9) and are read
+//      back with method 5; the curve found at boot is restored when leaving modes 2 and 3. Checked every 5 s. In modes 2
+//      and 3, 10 s at 95 C or more switches to full speed until the package has been below 80 C for a minute.
+//      On this EC generation (0x5508) the EC only follows FNST and the table in Lenovo's Custom power mode, so modes
+//      1-3 switch to Custom (GZFD.WMAA 0x2C with 0xFF; AC only) and fan=0 puts the previous mode back. Curve values are
+//      fan levels 1-10 (LenovoLegionLinux model_s2cn). No mode change in the first two minutes after boot (GPU bring-up).
 //
 // Gates: CPUID family 6 model 0xC5/0xC6 (read with the instruction, not the OpenCore-spoofed kernel copy), Tahoe only,
 // and the _xcpm_hwp_enabled symbol must resolve. Boot-arg -legioncpuoff disables the kext.
@@ -28,6 +39,7 @@
 #include <Headers/kern_util.hpp>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOMemoryDescriptor.h>
+#include <IOKit/acpi/IOACPIPlatformDevice.h>
 #include <IOKit/pci/IOPCIDevice.h>
 #include <kern/clock.h>
 #include <kern/thread_call.h>
@@ -41,14 +53,15 @@ int rdmsr_carefully(uint32_t msr, uint32_t *lo, uint32_t *hi);
 
 namespace {
 
-constexpr uint32_t kMsrPkgPowerLimit = 0x610, kMsrPkgThermStatus = 0x1B1, kMsrTempTarget = 0x1A2;
+constexpr uint32_t kMsrRaplUnit = 0x606, kMsrPkgEnergy = 0x611, kMsrPkgPowerLimit = 0x610, kMsrPkgThermStatus = 0x1B1, kMsrTempTarget = 0x1A2;
 constexpr uint32_t kMsrHwpCaps = 0x771, kMsrHwpRequest = 0x774;
 constexpr unsigned kMaxCpus = 64;
 
 volatile uint32_t *gXcpmHwpEnabled;
 bool gCpuOk;
-int gHwp = 1, gPl = 1, gEpp = 0x20, gHotSeconds, gCoolSeconds, gPlHeld;
-uint32_t gHolds;
+int gHwp = 1, gPl = 1, gGuard = 1, gFan = 0, gEpp = 0x20, gHotSeconds, gCoolSeconds, gCapW, gPkgW = -1;
+uint32_t gHolds, gLastEnergy;
+uint64_t gLastEnergyTime;
 char gStatus[256] = "starting";
 thread_call_t gTick;
 IOMemoryMap *gMchMap;
@@ -57,6 +70,13 @@ uint64_t gMchOriginal;
 bool gMchSaved;
 int gHwpApplied, gPlApplied;
 uint32_t gRewrites;
+IOACPIPlatformDevice *gGzfd;
+int gFanApplied, gFanRpm1, gFanRpm2, gFanState = -1, gFanHot, gFanCool, gFanRescue, gCurveTouched;
+unsigned gTicks;
+uint8_t gCurveNow[10], gCurveBoot[10], gCurveWant[10];
+bool gCurveNowOk, gCurveBootOk, gCurveWantSet;
+int gPowerMode = -1, gPrevMode = -1;  // WMAA 0x2D: 1 quiet, 2 balanced, 3 performance, 0xFF custom, 0xE0 extreme
+const uint8_t kLowCurve[10] = {1, 1, 2, 2, 3, 4, 5, 6, 8, 10};
 
 inline void wrmsr64(uint32_t msr, uint64_t v) {
     asm volatile("wrmsr" : : "c"(msr), "a"((uint32_t)v), "d"((uint32_t)(v >> 32)));
@@ -137,7 +157,143 @@ int pkgTempC() {
     return (int)((tt >> 16) & 0xFF) - (int)((ts >> 16) & 0x7F);
 }
 
+// \_SB.GZFD.<name>(0, method, buffer); the caller releases *result
+bool gzfd(const char *name, uint32_t method, const void *buf, unsigned len, OSObject **result) {
+    if (!gGzfd) {
+        gGzfd = OSDynamicCast(IOACPIPlatformDevice, IORegistryEntry::fromPath("IOACPIPlane:/_SB/GZFD"));
+        if (!gGzfd) return false;
+    }
+    OSObject *params[3] = {OSNumber::withNumber(0ULL, 32), OSNumber::withNumber(method, 32), OSData::withBytes(buf, len)};
+    IOReturn r = (params[0] && params[1] && params[2]) ? gGzfd->evaluateObject(name, result, params, 3)
+                                                       : kIOReturnNoMemory;
+    for (auto *o : params) OSSafeReleaseNULL(o);
+    return r == kIOReturnSuccess;
+}
+
+// WMAE 0x11 GetFeatureValue, 0x12 SetFeatureValue
+bool wmae(uint32_t method, uint32_t feature, uint32_t value, uint32_t *out) {
+    uint32_t args[2] = {feature, value};
+    OSObject *result = nullptr;
+    bool ok = gzfd("WMAE", method, args, 8, &result);
+    if (ok && out) {
+        auto *n = OSDynamicCast(OSNumber, result);
+        if (n) *out = n->unsigned32BitValue(); else ok = false;
+    }
+    OSSafeReleaseNULL(result);
+    return ok;
+}
+
+// WMAB 5: count dword, then F9F0-F9F9 as dwords
+bool readCurve(uint8_t out[10]) {
+    uint32_t zero = 0;
+    OSObject *result = nullptr;
+    bool ok = gzfd("WMAB", 5, &zero, 4, &result);
+    auto *d = OSDynamicCast(OSData, result);
+    ok = ok && d && d->getLength() >= 44;
+    if (ok) {
+        auto *w = static_cast<const uint32_t *>(d->getBytesNoCopy());
+        for (int i = 0; i < 10; i++) out[i] = (uint8_t)w[1 + i];
+    }
+    OSSafeReleaseNULL(result);
+    return ok;
+}
+
+// WMAB 6: points as bytes at 6, 8, .., 0x18
+void writeCurve(const uint8_t v[10]) {
+    uint8_t buf[0x1A] = {};
+    for (int i = 0; i < 10; i++) buf[6 + 2 * i] = v[i];
+    OSObject *result = nullptr;
+    gzfd("WMAB", 6, buf, sizeof(buf), &result);
+    OSSafeReleaseNULL(result);
+}
+
+// GZFD.WMAA: 0x2C set power mode, 0x2D get
+bool wmaa(uint32_t method, uint32_t arg, uint32_t *out) {
+    OSObject *result = nullptr;
+    bool ok = gzfd("WMAA", method, &arg, 4, &result);
+    if (ok && out) {
+        auto *n = OSDynamicCast(OSNumber, result);
+        if (n) *out = n->unsigned32BitValue(); else ok = false;
+    }
+    OSSafeReleaseNULL(result);
+    return ok;
+}
+
+void fan(int temp) {
+    uint32_t v = 0;
+    if (wmaa(0x2D, 0, &v)) gPowerMode = (int)v;
+    // a mode change notifies NPCF and the GPU; during the NVIDIA driver's display bring-up it kept the framebuffer
+    // heads from publishing, so no mode change in the first two minutes after boot
+    uint64_t now, limit;
+    clock_get_uptime(&now);
+    nanoseconds_to_absolutetime(120ULL * NSEC_PER_SEC, &limit);
+    if (now < limit) {
+    } else if (gFan || gFanRescue) {
+        if (gPowerMode >= 0 && gPowerMode != 0xFF) {
+            if (gPrevMode < 0) gPrevMode = gPowerMode;
+            wmaa(0x2C, 0xFF, nullptr);
+            if (wmaa(0x2D, 0, &v)) gPowerMode = (int)v;
+        }
+    } else if (gPrevMode >= 0) {
+        if (gPowerMode == 0xFF) wmaa(0x2C, (uint32_t)gPrevMode, nullptr);
+        if (wmaa(0x2D, 0, &v)) gPowerMode = (int)v;
+        gPrevMode = -1;
+    }
+    if (!wmae(0x11, 0x04020000, 0, &v)) { gFanState = -1; return; }
+    gFanState = (int)v;
+    gCurveNowOk = readCurve(gCurveNow);
+    if (gCurveNowOk && !gCurveBootOk) {
+        memcpy(gCurveBoot, gCurveNow, 10);
+        gCurveBootOk = true;
+        SYSLOG("lcp", "fan curve at boot %u,%u,%u,%u,%u,%u,%u,%u,%u,%u", gCurveBoot[0], gCurveBoot[1], gCurveBoot[2],
+               gCurveBoot[3], gCurveBoot[4], gCurveBoot[5], gCurveBoot[6], gCurveBoot[7], gCurveBoot[8], gCurveBoot[9]);
+    }
+    // a quieter curve gives way to full speed when hot
+    if (gFan >= 2) {
+        gFanHot = temp >= 95 ? gFanHot + 1 : 0;
+        if (gFanHot >= 2 && !gFanRescue) { gFanRescue = 1; SYSLOG("lcp", "package %d C: fans to full speed", temp); }
+        if (gFanRescue) {
+            gFanCool = (temp >= 0 && temp < 80) ? gFanCool + 1 : 0;
+            if (gFanCool >= 12) { gFanRescue = 0; gFanCool = 0; }
+        }
+    } else {
+        gFanRescue = gFanHot = gFanCool = 0;
+    }
+    bool full = gFan == 1 || gFanRescue;
+    if (full) {
+        if (v != 1) wmae(0x12, 0x04020000, 1, nullptr);
+        gFanApplied = 1;
+    } else if (gFanApplied) {
+        if (v != 0) wmae(0x12, 0x04020000, 0, nullptr);
+        gFanApplied = 0;
+    }
+    uint8_t want[10];
+    bool custom = false;
+    if (gFan == 2 && gCurveWantSet) {
+        memcpy(want, gCurveWant, 10);
+        custom = true;
+    } else if (gFan == 3 && gCurveBootOk) {
+        bool empty = true;
+        for (int i = 0; i < 10; i++) empty = empty && !gCurveBoot[i];
+        for (int i = 0; i < 10; i++)
+            want[i] = empty ? kLowCurve[i] : (i >= 8 ? gCurveBoot[i] : (uint8_t)max(1, gCurveBoot[i] * 6 / 10));
+        custom = true;
+    } else if (gCurveTouched && gCurveBootOk) {
+        memcpy(want, gCurveBoot, 10);
+    } else {
+        memcpy(want, gCurveNow, 10);
+    }
+    if (gCurveNowOk && memcmp(want, gCurveNow, 10) != 0) {
+        writeCurve(want);
+        memcpy(gCurveNow, want, 10);
+    }
+    gCurveTouched = custom;
+    if (wmae(0x11, 0x04030001, 0, &v)) gFanRpm1 = (int)v;
+    if (wmae(0x11, 0x04030002, 0, &v)) gFanRpm2 = (int)v;
+}
+
 void tick(thread_call_param_t, thread_call_param_t) {
+    if (gTicks++ % 5 == 0) fan(pkgTempC());
     // hwp
     if (gHwp && gXcpmHwpEnabled) {
         *gXcpmHwpEnabled = 0;
@@ -149,45 +305,71 @@ void tick(thread_call_param_t, thread_call_param_t) {
         *gXcpmHwpEnabled = 1;  // XCPM takes the request back at its next p-state change
         gHwpApplied = 0;
     }
-    // pl, with a heat guard: 30 s at 100 C or more puts the firmware limit back ("held"); a minute below 85 C releases it
+    // package power over the last tick, from the energy counter
     int temp = pkgTempC();
-    if (gPl && gPlHeld) {
-        gCoolSeconds = (temp >= 0 && temp < 85) ? gCoolSeconds + 1 : 0;
-        if (gCoolSeconds >= 60) {
-            SYSLOG("lcp", "package back to %d C: power limit raised again", temp);
-            gPlHeld = 0;
-            gCoolSeconds = 0;
+    uint64_t unit = rdmsr64(kMsrRaplUnit), nowAbs, ns;
+    uint32_t energy = (uint32_t)rdmsr64(kMsrPkgEnergy);
+    clock_get_uptime(&nowAbs);
+    if (gLastEnergyTime) {
+        absolutetime_to_nanoseconds(nowAbs - gLastEnergyTime, &ns);
+        uint64_t uj = ((uint64_t)(energy - gLastEnergy) * 1000000ULL) >> ((unit >> 8) & 0x1F);
+        if (ns) gPkgW = (int)(uj * 1000 / ns);
+    }
+    gLastEnergy = energy;
+    gLastEnergyTime = nowAbs;
+    // heat guard: step the cap down after each minute at 100 C or more, back up 5 W per 30 s below 90 C
+    if (!gPl || !gGuard) {
+        gCapW = gHotSeconds = gCoolSeconds = 0;
+    } else {
+        gHotSeconds = temp >= 100 ? gHotSeconds + 1 : 0;
+        if (gHotSeconds >= 60) {
+            int from = gCapW ? gCapW : gPkgW;
+            gCapW = max(45, from - 10);
+            gHotSeconds = 0;
+            gHolds++;
+            SYSLOG("lcp", "package %d C for a minute at %d W: power limit capped at %d W", temp, gPkgW, gCapW);
+        }
+        if (gCapW) {
+            gCoolSeconds = (temp >= 0 && temp < 90) ? gCoolSeconds + 1 : 0;
+            if (gCoolSeconds >= 30) {
+                gCapW += 5;
+                gCoolSeconds = 0;
+                if (gCapW >= (int)(((rdmsr64(kMsrPkgPowerLimit) & 0x7FFF)) >> (unit & 0xF))) gCapW = 0;
+            }
         }
     }
-    if (gPl && !gPlHeld && mapMchbar()) {
+    if (gPl && mapMchbar()) {
         if (gMchOriginal >> 63) {
             snprintf(gStatus, sizeof(gStatus), "MCHBAR power limit locked (0x%llx); pl not applied",
                      (unsigned long long)gMchOriginal);
             gPl = 0;
         } else {
             uint64_t want = rdmsr64(kMsrPkgPowerLimit) & ~(1ULL << 63);
+            if (gCapW) {
+                uint64_t cap = (uint64_t)gCapW << (unit & 0xF);
+                if ((want & 0x7FFF) > cap) want = (want & ~0x7FFFULL) | cap;
+                if (((want >> 32) & 0x7FFF) > cap) want = (want & ~(0x7FFFULL << 32)) | (cap << 32);
+            }
             uint64_t cur = ((uint64_t)gMchPl[1] << 32) | gMchPl[0];
             if (cur != want) writeMch(want);
             gPlApplied = 1;
-            gHotSeconds = temp >= 100 ? gHotSeconds + 1 : 0;
-            if (gHotSeconds >= 30) {
-                SYSLOG("lcp", "package at %d C for 30 s: firmware power limit until it cools below 85 C", temp);
-                gPlHeld = 1;
-                gHotSeconds = 0;
-                gHolds++;
-            }
         }
     }
-    if ((!gPl || gPlHeld) && gPlApplied && gMchSaved) {
+    if (!gPl && gPlApplied && gMchSaved) {
         writeMch(gMchOriginal);
         gPlApplied = 0;
     }
     if (strncmp(gStatus, "MCHBAR power limit locked", 25) != 0)
         snprintf(gStatus, sizeof(gStatus),
-                 "cpu %s, xcpm hwp flag %s, hwp %d (rewrites %u), pl %d%s (heat holds %u), epp %d, pkg %d C, mchbar %s",
+                 "cpu %s, xcpm hwp flag %s, hwp %d (rewrites %u), pl %d (guard %d, cap %d W, steps %u), epp %d, pkg %d C %d W, "
+                 "mchbar %s, "
+                 "fan mode %d%s, power mode 0x%x%s, full speed %s (%d / %d rpm)",
                  gCpuOk ? "arrow lake" : "unsupported", gXcpmHwpEnabled ? (*gXcpmHwpEnabled ? "1" : "0") : "missing",
-                 gHwpApplied, gRewrites, gPlApplied, gPlHeld ? " held for heat" : "", gHolds, gEpp, temp,
-                 gMchPl ? "mapped" : "not mapped");
+                 gHwpApplied, gRewrites, gPlApplied, gGuard, gCapW, gHolds, gEpp, temp, gPkgW,
+                 gMchPl ? "mapped" : "not mapped", gFan, gFanRescue ? " (hot: full)" : "", gPowerMode,
+                 (gFan && gPowerMode >= 0 && gPowerMode != 0xFF) ? " (custom needs AC)" : "",
+                 gFanState < 0 ? "unknown" : (gFanState ? "on" : "off"), gFanRpm1,
+                 gFanRpm2);
     uint64_t deadline;
     clock_interval_to_deadline(1, NSEC_PER_SEC, &deadline);
     thread_call_enter_delayed(gTick, deadline);
@@ -199,28 +381,56 @@ int sysctlInt(struct sysctl_oid *oidp, void *arg1, int arg2, struct sysctl_req *
     if (err || !req->newptr) return err;
     if (arg1 == &gEpp) {
         if (v < 0 || v > 255) return EINVAL;
+    } else if (arg1 == &gFan) {
+        if (v < 0 || v > 3) return EINVAL;
     } else if (v != 0 && v != 1) {
         return EINVAL;
     }
     if (arg1 == &gHwp && v && !gXcpmHwpEnabled) return ENOTSUP;
-    if (!gCpuOk && v && arg1 != &gEpp) return ENOTSUP;
+    if (!gCpuOk && v && arg1 != &gEpp && arg1 != &gFan) return ENOTSUP;
     *static_cast<int *>(arg1) = v;
+    return 0;
+}
+
+// "a,b,..,j": ten points; reading shows the EC's current curve
+int sysctlCurve(struct sysctl_oid *oidp, void *, int, struct sysctl_req *req) {
+    char buf[64];
+    const uint8_t *c = gCurveNowOk ? gCurveNow : gCurveWant;
+    snprintf(buf, sizeof(buf), "%u,%u,%u,%u,%u,%u,%u,%u,%u,%u", c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9]);
+    int err = sysctl_handle_string(oidp, buf, sizeof(buf), req);
+    if (err || !req->newptr) return err;
+    uint8_t v[10];
+    const char *p = buf;
+    for (int i = 0; i < 10; i++) {
+        unsigned n = 0, digits = 0;
+        while (*p >= '0' && *p <= '9' && digits < 4) { n = n * 10 + (unsigned)(*p++ - '0'); digits++; }
+        if (!digits || n > 255) return EINVAL;
+        v[i] = (uint8_t)n;
+        if (i < 9 && *p++ != ',') return EINVAL;
+    }
+    if (*p && *p != '\n') return EINVAL;
+    memcpy(gCurveWant, v, 10);
+    gCurveWantSet = true;
     return 0;
 }
 
 }  // namespace
 extern struct sysctl_oid sysctl__debug_legioncpu, sysctl__debug_legioncpu_hwp, sysctl__debug_legioncpu_pl,
-    sysctl__debug_legioncpu_epp, sysctl__debug_legioncpu_status;
+    sysctl__debug_legioncpu_guard, sysctl__debug_legioncpu_fan, sysctl__debug_legioncpu_fancurve, sysctl__debug_legioncpu_epp, sysctl__debug_legioncpu_status;
 namespace {
 void pluginStart() {
     gCpuOk = arrowLake();
     if (!gCpuOk) gHwp = gPl = 0;
     if (checkKernelArgument("-legioncpunohwp")) gHwp = 0;
     if (checkKernelArgument("-legioncpunopl")) gPl = 0;
+    if (checkKernelArgument("-legioncpunofan")) gFan = 0;
     SYSLOG("lcp", "start, cpu %s", gCpuOk ? "Arrow Lake" : "not Arrow Lake: switches stay off");
     sysctl_register_oid(&sysctl__debug_legioncpu);
     sysctl_register_oid(&sysctl__debug_legioncpu_hwp);
     sysctl_register_oid(&sysctl__debug_legioncpu_pl);
+    sysctl_register_oid(&sysctl__debug_legioncpu_guard);
+    sysctl_register_oid(&sysctl__debug_legioncpu_fan);
+    sysctl_register_oid(&sysctl__debug_legioncpu_fancurve);
     sysctl_register_oid(&sysctl__debug_legioncpu_epp);
     sysctl_register_oid(&sysctl__debug_legioncpu_status);
     lilu.onPatcherLoadForce([](void *, KernelPatcher &patcher) {
@@ -244,6 +454,12 @@ SYSCTL_PROC(_debug_legioncpu, OID_AUTO, hwp, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_
             sysctlInt, "I", "1 = program HWP requests per core (highest/lowest), 0 = leave them to XCPM");
 SYSCTL_PROC(_debug_legioncpu, OID_AUTO, pl, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, &gPl, 0,
             sysctlInt, "I", "1 = MCHBAR power limit follows MSR 0x610, 0 = firmware value");
+SYSCTL_PROC(_debug_legioncpu, OID_AUTO, guard, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, &gGuard, 0,
+            sysctlInt, "I", "1 = heat guard steps the power limit down at 100 C, 0 = only the CPU's own throttling");
+SYSCTL_PROC(_debug_legioncpu, OID_AUTO, fan, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, &gFan, 0,
+            sysctlInt, "I", "fans: 0 auto (EC curve), 1 full speed, 2 custom curve, 3 low");
+SYSCTL_PROC(_debug_legioncpu, OID_AUTO, fancurve, CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_LOCKED, nullptr, 0,
+            sysctlCurve, "A", "custom fan curve for fan=2: ten comma-separated EC values");
 SYSCTL_PROC(_debug_legioncpu, OID_AUTO, epp, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, &gEpp, 0,
             sysctlInt, "I", "EPP written with hwp=1 (0 performance .. 255 power saving)");
 SYSCTL_STRING(_debug_legioncpu, OID_AUTO, status, CTLFLAG_RD | CTLFLAG_LOCKED, gStatus, sizeof(gStatus), "state");
