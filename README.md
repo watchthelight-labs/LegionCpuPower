@@ -1,9 +1,5 @@
 # LegionCpuPower
 
-> **Heads up:** a good portion of this code is AI generated. I do understand how it works,
-> and I'm happy to explain any of it. If something looks wrong or you have a question,
-> open an issue or ping me on Discord (`watchthelight`).
-
 A Lilu plugin that lets an Intel Core Ultra 200HX (Arrow Lake-HX) run at its real clocks and power under macOS Tahoe. Two
 things hold it back on a Hackintosh, and the plugin fixes both:
 
