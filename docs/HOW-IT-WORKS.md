@@ -83,7 +83,9 @@ a time with a 45 W floor, and back up 5 W per 30 s once the package is below 90 
 
 ## Things this does not do
 
-- macOS still sees one performance level, so the scheduler does not know P-cores from E-cores.
+- macOS still sees one performance level, so the scheduler does not know P-cores from E-cores. `sched=1` (0.4.x) nudges
+  it with the two processor-set masks `choose_processor_smt` reads (preferred, migration), which stay 0 on Intel; it is
+  experimental, see the README.
 - The battery profile's Low Power Mode caps XCPM's ratio further; with hwp=1 the plugin's request wins, so the
   battery-saving effect of Low Power Mode on the CPU is gone. Use EPP (`debug.legioncpu.epp`, higher = more saving) if
   battery life matters.

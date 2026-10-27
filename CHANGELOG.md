@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.1 (2026-10-19)
+
+- `debug.legioncpu.sched` (0.4.0, on by default in the kext): the scheduler prefers the favoured P-cores and avoids the
+  E-cores by writing the per-processor-set preferred and migration masks. Offsets are checked against the kernel first;
+  `-legioncpunosched` turns it off. Measured +10-13 % on one thread.
+- 0.4.1: core types are taken from the per-cpu HWP pass and the setup is retried every tick until every recommended cpu
+  has reported (0.4.0 found empty masks at the first tick and stayed off).
+- Experimental: a desktop freeze followed a session with sched on and the cause is not fully ruled out.
+- LegionFan 0.3: CPU profile (EPP 0 / 32 / 128), P-core and heat guard toggles, glass panel (macOS 26).
+
 ## 0.3.3 (2026-10-19)
 
 - Fan control for the Legion 5 15IAX10: `debug.legioncpu.fan` (auto, full, custom curve, low) and

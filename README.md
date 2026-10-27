@@ -58,6 +58,7 @@ Both fixes are on at boot. They can be changed at runtime, and a reboot always r
 | `debug.legioncpu.hwp` | 1 = per-core HWP requests from this plugin, 0 = back to XCPM |
 | `debug.legioncpu.pl` | 1 = MCHBAR limit follows MSR 0x610, 0 = the firmware's value |
 | `debug.legioncpu.epp` | energy/performance hint written with hwp=1: 0 performance ... 255 power saving (default 32) |
+| `debug.legioncpu.sched` | 1 = the scheduler prefers the two favoured P-cores and avoids the E-cores, 0 = stock (see below) |
 | `debug.legioncpu.guard` | 1 = heat guard (below), 0 = only the CPU's own thermal throttling |
 | `debug.legioncpu.fan` | 0 auto (firmware curve), 1 full speed, 2 custom curve, 3 low |
 | `debug.legioncpu.fancurve` | the ten points of the custom curve, fan levels 1-10, e.g. `2,2,3,4,5,6,7,8,9,10` |
@@ -72,6 +73,15 @@ plugin.
 10 W (never below 45 W), and again after every further minute that hot. Each 30 s below 90 C raises the cap by 5 W
 until it is back at the firmware's limits. It never touches TjMax or any thermal register; the CPU's own thermal
 protection stays in charge. Set `debug.legioncpu.guard=0` for benchmarks.
+
+**Scheduler preference (0.4.x).** macOS sees one performance level, so a single thread can land on an E-core. With
+`sched=1` the plugin writes the scheduler's two per-processor-set masks (the ones only Apple Silicon's Edge scheduler
+normally sets): preferred = the favoured P-cores (highest HWP value, cpus 10 and 22 here), avoid = the E-cores. It checks
+the structure offsets against the kernel's instructions first and stays off if anything differs. Measured with the spin
+load: 1 thread +10-13 %, 4 threads +13 %, 8 threads +7 %, 24 threads +1 %. Status: it booted and measured fine on the
+15IAX10 (0.4.1), but one desktop freeze followed a session with it on; the freeze matches an NVIDIA driver bug that is
+not ours (a thread_call pileup), yet the scheduler path has not been run for long since, so treat `sched` as
+experimental. The author runs with it off.
 
 ## Fans (Legion 5 15IAX10)
 
@@ -88,6 +98,9 @@ Measured: full speed 5500-5700 rpm, the firmware curve 3300-4300 rpm at the same
 **LegionFan** (`legionfan/`) is a menu bar app for this: Auto, Low, Full speed, Custom curve and a ten-slider curve
 editor, with the fan speeds in the menu. A root LaunchDaemon applies the saved choice at boot, before login; the app
 starts at login. `legionfan/build.sh`, then `sudo legionfan/install.sh` (`--remove` uninstalls).
+
+LegionFan 0.3 also has a CPU profile (Performance, Balanced, Battery saver: EPP 0, 32, 128), switches for the P-core
+preference and the heat guard, and a glass-style panel (needs macOS 26).
 
 ## What it changes, exactly
 
