@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 A=out/LegionFan.app/Contents
 rm -rf out && mkdir -p "$A/MacOS"
-swiftc -O -parse-as-library -target x86_64-apple-macos14 LegionFan.swift -o "$A/MacOS/LegionFan"
+swiftc -O -parse-as-library -target x86_64-apple-macos26 -sdk "$(xcrun --sdk macosx --show-sdk-path)" LegionFan.swift -o "$A/MacOS/LegionFan"
 cat > "$A/Info.plist" <<PL
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -14,9 +14,9 @@ cat > "$A/Info.plist" <<PL
 <key>CFBundleName</key><string>LegionFan</string>
 <key>CFBundleExecutable</key><string>LegionFan</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.1.0</string>
-<key>CFBundleVersion</key><string>0.1.0</string>
-<key>LSMinimumSystemVersion</key><string>14.0</string>
+<key>CFBundleShortVersionString</key><string>0.3.0</string>
+<key>CFBundleVersion</key><string>0.3.0</string>
+<key>LSMinimumSystemVersion</key><string>26.0</string>
 <key>LSUIElement</key><true/>
 </dict></plist>
 PL
