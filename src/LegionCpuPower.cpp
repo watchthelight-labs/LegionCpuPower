@@ -38,7 +38,8 @@
 //      masks, so on Intel they stay 0. With sched=1 this kext sets preferred = the favoured P-cores (highest HWP
 //      performance) and migration = the E-cores, so work goes to the fastest cores first, then the other P-cores, and
 //      to E-cores only when no P-core is idle. Under full load every CPU is still used. The pset field offsets
-//      (+0x8a0, +0x8a8, 25G241) are checked against the instructions in choose_processor_smt before any write.
+//      (+0x8a0, +0x8a8; same on 25G241 and 25G332) are checked against the instructions in choose_processor_smt before
+//      any write, so a build that moves them turns the scheduler part off instead of writing to the wrong field.
 //
 // Gates: CPUID family 6 model 0xC5/0xC6 (read with the instruction, not the OpenCore-spoofed kernel copy), Tahoe only,
 // and the _xcpm_hwp_enabled symbol must resolve. Boot-arg -legioncpuoff disables the kext.
@@ -148,7 +149,7 @@ bool schedSetup() {
         if (gHighest[c] == top) gMaskFav |= 1ULL << c;
     }
     if (!readsDisp(gChooseProc, 0x8a0) || !readsDisp(gChooseProc, 0x8a8)) {
-        gSchedWhy = "choose_processor_smt does not match 25G241 (pset +0x8a0/+0x8a8)";
+        gSchedWhy = "choose_processor_smt does not read pset +0x8a0/+0x8a8 on this build";
         return true;
     }
     auto *pref = reinterpret_cast<volatile uint64_t *>(pset + 0x8a0), *mig = reinterpret_cast<volatile uint64_t *>(pset + 0x8a8);
