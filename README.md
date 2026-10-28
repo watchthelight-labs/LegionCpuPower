@@ -17,7 +17,7 @@ firmware methods, with a menu bar app, LegionFan, to switch between them.
 
 ## Results
 
-Lenovo Legion 5 15IAX10 (Core Ultra 9 275HX), macOS 26.7.1 (25G241), OpenCore 1.0.8, Lilu 1.7.2, on AC. The load is
+Lenovo Legion 5 15IAX10 (Core Ultra 9 275HX), macOS 26.7.1 (25G241) and since 2026-10-28 26.7.2 (25G332; the scheduler check reports `sched 1 (ok ...)` there), OpenCore 1.0.8, Lilu 1.7.2, on AC. The load is
 `tools/spin.c` (integer work per thread), measured with `tools/cpuload.py`:
 
 | load | before | with the plugin | change |
