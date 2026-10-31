@@ -1,4 +1,6 @@
-# LegionCpuPower
+# WTLLegionCpuPower
+
+Renamed from `LegionCpuPower` on 2026-10-31; the kext is still `LegionCpuPower.kext`. Old links redirect here.
 
 A Lilu plugin that lets an Intel Core Ultra 200HX (Arrow Lake-HX) run at its real clocks and power under macOS Tahoe. Two
 things hold it back on a Hackintosh, and the plugin fixes both:
